@@ -1,0 +1,234 @@
+--2.4
+
+MODULE memoire(bus)
+VAR
+	data0 : {0,1};
+	data1 : {0,1};
+	valid : boolean;
+	out : {0,1};
+ASSIGN
+	init(valid) := FALSE;
+	next(data0) :=
+		case
+			bus.request = TRUE & bus.CTRL = ecriture & bus.ADDR = 0 : bus.DATA;
+			TRUE : data0;
+		esac;
+	next(data1) :=
+		case
+			bus.request = TRUE & bus.CTRL = ecriture & bus.ADDR = 1 : bus.DATA;
+			TRUE : data1;
+		esac;		
+	next(out) :=
+		case
+			bus.request = TRUE & bus.CTRL = lecture & bus.ADDR = 0 : data0;
+			bus.request = TRUE & bus.CTRL = lecture & bus.ADDR = 1 : data1;
+			TRUE : out;
+		esac;
+	next(valid) :=
+		case
+			bus.request = TRUE : TRUE;
+			valid = TRUE : FALSE;
+			TRUE : FALSE;
+		esac;
+
+MODULE processeur(cache)
+VAR
+	CMD : {RD, WR, NONE};
+	addr : {0,1}; --addresse demandé
+	val : {0,1};  --valeur à écrire
+	valR : {0,1}; 		--valeur de retour
+	waiting : boolean; --gelé
+ASSIGN
+	init(CMD) := {RD, WR, NONE};
+	init(addr) := {0,1};
+	init(val) := {0,1};
+	next(CMD) :=
+		case
+			cache.asking & !cache.found : CMD;
+			TRUE : {RD, WR, NONE};
+		esac;
+	next(addr) := 
+		case
+			cache.asking & !cache.found : addr;
+			TRUE : {0,1};
+		esac;
+	next(val) := 
+		case
+			cache.asking & !cache.found : val;
+			TRUE : {0,1};
+		esac;
+	waiting := cache.asking & !cache.found;
+	valR := cache.valR;
+
+MODULE arbitre(cache1, cache2, cache3)
+VAR
+	grant : {1, 2, 3, mem};
+	last : {1, 2, 3, mem};       --should never be mem
+ASSIGN
+	init(last) := 3;
+	next(grant) :=
+		case
+			grant!=mem : mem;
+			last=1:
+				case
+					cache2.asking : 2;
+					cache3.asking : 3;
+					cache1.asking : 1;
+					TRUE : mem;
+				esac;
+			last=2:
+				case
+					cache3.asking : 3;
+					cache1.asking : 1;
+					cache2.asking : 2;
+					TRUE : mem;
+				esac;
+			last=3:
+				case
+					cache1.asking : 1;
+					cache2.asking : 2;
+					cache3.asking : 3;
+					TRUE : mem;
+				esac;
+			TRUE : mem;
+		esac;
+	next(last) :=
+		case
+			grant!=mem : grant;
+			TRUE : last; 
+		esac;
+		
+
+MODULE bus(arb, memory, cache1, cache2, cache3)
+VAR
+	ADDR : {0,1};
+	DATA : {0,1};
+	CTRL : {lecture, ecriture, mem};
+	asking : {1, 2, 3, mem}; --should never be mem
+	valid : boolean;
+	request : boolean;
+ASSIGN
+	init(asking) := 1;
+	ADDR :=
+		case
+			arb.grant=1 : cache1.AD;
+			arb.grant=2 : cache2.AD;
+			arb.grant=3 : cache3.AD;
+			TRUE : 0;
+		esac;
+	DATA :=
+		case
+			arb.grant=1 : cache1.val;
+			arb.grant=2 : cache2.val;
+			arb.grant=3 : cache3.val;
+			arb.grant=mem : memory.out;
+			TRUE : 0;
+		esac;
+	CTRL := 
+		case
+			arb.grant=1 : cache1.cmd;
+			arb.grant=2 : cache2.cmd;
+			arb.grant=3 : cache3.cmd;
+			TRUE : mem;
+		esac;
+	next(asking) :=
+		case
+			arb.grant!=mem : arb.grant;
+			TRUE : asking;
+		esac;
+	valid :=  memory.valid;
+	request := arb.grant!=mem;
+
+MODULE cache(proc, bus, arb, id)
+VAR
+	AD : {0,1};  --addresse demandé par le proccesseur
+	val : {0,1}; --valeur demandé par le processeur en cas d'écriture
+	addR : {0,1};   --addresse presente dans le cache
+	valR : {0,1};	 --valeur correspondante présente dans le cache
+	pre_valR : {0,1};   --maintient de la valeur du cycle precedent
+	cmd : {lecture, ecriture};
+	found : boolean;
+	asking : boolean;
+ASSIGN
+	val := proc.val;
+	AD := proc.addr;
+	init(addR) := {0,1};
+	asking :=
+		case
+			found : FALSE;
+			proc.CMD=RD & addR=proc.addr : FALSE;
+			proc.CMD!=NONE : TRUE;
+			TRUE : FALSE;
+		esac;
+	found :=
+		case
+			bus.valid & bus.asking=id : TRUE;
+			TRUE : FALSE;
+		esac;
+	valR :=
+		case
+			found : bus.DATA;
+			bus.request & bus.CTRL=ecriture & bus.ADDR=addR : bus.DATA; -- snoop
+			TRUE : pre_valR;
+		esac;
+	next(pre_valR) := valR;
+	next(addR):=
+		case
+			arb.grant=id & proc.CMD=RD : AD;
+			TRUE : addR;
+		esac;
+	cmd :=
+		case
+			proc.CMD = RD : lecture;
+			proc.CMD = WR : ecriture;
+			TRUE : lecture;
+		esac;
+
+MODULE main
+VAR
+	MEM : memoire(BUS);
+	PROC1 : processeur(CACHE1);
+	PROC2 : processeur(CACHE2);
+	PROC3 : processeur(CACHE3);
+	ARBITRE : arbitre(CACHE1, CACHE2, CACHE3);
+	BUS : bus(ARBITRE, MEM, CACHE1,CACHE2, CACHE3);
+	CACHE1 : cache(PROC1, BUS, ARBITRE, 1);
+	CACHE2 : cache(PROC2, BUS, ARBITRE, 2);
+	CACHE3 : cache(PROC3, BUS, ARBITRE, 3);
+	
+
+
+
+--Valeurs absurdes
+SPEC AG(ARBITRE.last!=mem)
+SPEC AG(BUS.asking!=mem)
+--La mémoire peut ne plus jamais etre solicité
+SPEC EF EG(!MEM.valid)
+
+--Pas de famine:
+SPEC PROC1.waiting -> AF !PROC1.waiting
+--SPEC PROC2.waiting -> AF !PROC2.waiting
+--SPEC PROC3.waiting -> AF !PROC3.waiting
+--Si me commande en lecture est élu, au tour suivant la valeur se trouvera dans mon registre de retour
+SPEC AG(PROC1.CMD=RD & PROC1.addr=0 & ARBITRE.grant=1 & CACHE1.addR=1 & MEM.data0=1 -> AX PROC1.valR=1)
+--SPEC AG(PROC2.CMD=RD & PROC2.addr=0 & ARBITRE.grant=2 & CACHE2.addR=1 & MEM.data0=1 -> AX PROC2.valR=1)
+--SPEC AG(PROC3.CMD=RD & PROC3.addr=0 & ARBITRE.grant=3 & CACHE3.addR=1 & MEM.data0=1 -> AX PROC3.valR=1)
+--Si ma requete en ecriture est élu, ma valeur sera écrite en mémoire au cycle suivant
+SPEC AG( (PROC1.CMD=WR & PROC1.val=1 & PROC1.addr=1 & ARBITRE.grant=1) -> AX (MEM.data1=1) )
+--SPEC AG( (PROC2.CMD=WR & PROC2.val=1 & PROC2.addr=1 & ARBITRE.grant=2) -> AX (MEM.data1=1) )
+--SPEC AG( (PROC3.CMD=WR & PROC3.val=1 & PROC3.addr=1 & ARBITRE.grant=3) -> AX (MEM.data1=1) )
+
+
+--L'arbitre choisira toujours la mémoire si il ne recoit aucune demande des caches
+SPEC AG(ARBITRE.grant=mem) -> AG(!CACHE1.asking & !CACHE2.asking & !CACHE3.asking)
+
+--Le bus affichera bien l'adresse et la valeur demandé par le proccesseur choisis par l'abitre
+SPEC AG (ARBITRE.grant=1 -> BUS.ADDR=PROC1.addr & BUS.DATA=PROC1.val)
+
+--Une demande du cache sera toujours complété
+SPEC AG((CACHE1.asking )-> AF CACHE1.found)
+--Le cache peut ne jamais faire de demandes:
+SPEC EF EG(!CACHE1.asking)
+
+--Snoop
+SPEC AG( (PROC1.CMD=WR & PROC1.val=1 & PROC1.addr=1 & ARBITRE.grant=1 & CACHE2.addR=1 & CACHE3.addR=1) -> (CACHE2.valR=1 & CACHE3.valR=1))

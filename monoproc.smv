@@ -1,0 +1,189 @@
+--2.3
+
+MODULE memoire(bus)
+VAR
+	data0 : {0,1};
+	data1 : {0,1};
+	valid : boolean;
+	out : {0,1};
+ASSIGN
+	init(valid) := FALSE;
+	next(data0) :=
+		case
+			bus.request = TRUE & bus.CTRL = ecriture & bus.ADDR = 0 : bus.DATA;
+			TRUE : data0;
+		esac;
+	next(data1) :=
+		case
+			bus.request = TRUE & bus.CTRL = ecriture & bus.ADDR = 1 : bus.DATA;
+			TRUE : data1;
+		esac;		
+	next(out) :=
+		case
+			bus.request = TRUE & bus.CTRL = lecture & bus.ADDR = 0 : data0;
+			bus.request = TRUE & bus.CTRL = lecture & bus.ADDR = 1 : data1;
+			TRUE : out;
+		esac;
+	next(valid) :=
+		case
+			bus.request = TRUE : TRUE;
+			valid = TRUE : FALSE;
+			TRUE : FALSE;
+		esac;
+
+MODULE processeur(cache)
+VAR
+	CMD : {RD, WR, NONE};
+	addr : {0,1}; --addresse demandé
+	val : {0,1};  --valeur à écrire
+	valR : {0,1}; 		--valeur de retour
+	waiting : boolean; --gelé
+ASSIGN
+	init(CMD) := {RD, WR, NONE};
+	init(addr) := {0,1};
+	init(val) := {0,1};
+	next(CMD) :=
+		case
+			cache.asking & !cache.found : CMD;
+			TRUE : {RD, WR, NONE};
+		esac;
+	next(addr) := 
+		case
+			cache.asking & !cache.found : addr;
+			TRUE : {0,1};
+		esac;
+	next(val) := 
+		case
+			cache.asking & !cache.found : val;
+			TRUE : {0,1};
+		esac;
+	waiting := cache.asking & !cache.found;
+	valR := cache.valR;
+
+MODULE arbitre(cache)
+VAR
+	grant : {1, mem};
+ASSIGN
+	next(grant) :=
+		case
+			grant=mem & cache.asking : 1;
+			grant=1 : mem;
+			TRUE : mem;
+		esac;
+			
+	
+MODULE bus(arb, memory, cache1)
+VAR
+	ADDR : {0,1};
+	DATA : {0,1};
+	CTRL : {lecture, ecriture, mem};
+	asking : {1, mem}; --should never be mem
+	valid : boolean;
+	request : boolean;
+ASSIGN
+	init(asking) := 1;
+	ADDR :=
+		case
+			arb.grant=1 : cache1.AD;
+			TRUE : 0;
+		esac;
+	DATA :=
+		case
+			arb.grant=1 : cache1.val;
+			arb.grant=mem : memory.out;
+			TRUE : 0;
+		esac;
+	CTRL := 
+		case
+			arb.grant=1 : cache1.cmd;
+			TRUE : mem;
+		esac;
+	next(asking) :=
+		case
+			arb.grant!=mem : arb.grant;
+			TRUE : asking;
+		esac;
+	valid :=  memory.valid;
+	request := arb.grant!=mem;
+
+MODULE cache(proc, bus, arb)
+VAR
+	AD : {0,1};  --addresse demandé par le proccesseur
+	val : {0,1}; --valeur demandé par le processeur en cas d'écriture
+	addR : {0,1};   --addresse presente dans le cache
+	valR : {0,1};	 --valeur correspondante présente dans le cache
+	pre_valR : {0,1};   --maintient de la valeur du cycle precedent
+	cmd : {lecture, ecriture};
+	found : boolean;
+	asking : boolean;
+ASSIGN
+	val := proc.val;
+	AD := proc.addr;
+	init(addR) := {0,1};
+	asking :=
+		case
+			found : FALSE;
+			proc.CMD=RD & addR=proc.addr : FALSE;
+			proc.CMD!=NONE : TRUE;
+			TRUE : FALSE;
+		esac;
+	found :=
+		case
+			bus.valid & bus.asking=1 : TRUE;
+			TRUE : FALSE;
+		esac;
+	valR :=
+		case
+			found : bus.DATA;
+			TRUE : pre_valR;
+		esac;
+	next(pre_valR) := valR;
+	next(addR):=
+		case
+			arb.grant=1 & proc.CMD=RD : AD;
+			TRUE : addR;
+		esac;
+	cmd :=
+		case
+			proc.CMD = RD : lecture;
+			proc.CMD = WR : ecriture;
+			TRUE : lecture;
+		esac;
+
+MODULE main
+VAR
+	MEM : memoire(BUS);
+	PROC : processeur(CACHE);
+	ARBITRE : arbitre(CACHE);
+	BUS : bus(ARBITRE, MEM, CACHE);
+	CACHE : cache(PROC, BUS, ARBITRE);
+	
+
+--La mémoire peut ne plus jamais etre solicité
+SPEC EF EG(!MEM.valid)
+--Ou au contraire peut recevoir des demandes d'ecriture à tous les cycles fesant clignoter une donnée
+SPEC (EF (EG((MEM.data0=1 -> EX MEM.data0=0))))& (EF (EG((MEM.data0=0 -> EX MEM.data0=1))))
+
+--Le Processeur ne sera jamais bloqué indéfiniment:
+SPEC PROC.waiting -> AF !PROC.waiting
+--Si me commande en lecture est élu, au tour suivant la valeur se trouvera dans mon registre de retour
+SPEC AG(PROC.CMD=RD & PROC.addr=0 & ARBITRE.grant=1 & CACHE.addR=1 & MEM.data0=1 -> AX PROC.valR=1)
+--Si ma requete en ecriture est élu, ma valeur sera écrite en mémoire au cycle suivant
+SPEC AG( (PROC.CMD=WR & PROC.val=1 & PROC.addr=1 & ARBITRE.grant=1) -> AX (MEM.data1=1) )
+
+--L'arbitre choisira toujours la mémoire si il ne recoit aucune demande du cache
+SPEC AG(ARBITRE.grant=mem) -> AG(!CACHE.asking)
+
+--Le bus affichera bien l'adresse et la valeur demandé par le proccesseur choisis par l'abitre
+SPEC AG (ARBITRE.grant=1 -> BUS.ADDR=PROC.addr & BUS.DATA=PROC.val)
+--le bus peut etre solicité par le cache en permanence
+SPEC AG(BUS.asking=1)
+
+--Une demande du cache sera toujours complété
+SPEC AG((CACHE.asking )-> AF CACHE.found)
+--Le cache peut ne jamais faire de demandes:
+SPEC EF EG(!CACHE.asking)
+--Que le cache ne fasse jamais de demandes implique que 1)le processeur ne demande jamais d'ecriture ou 2)le processeur demande une adresse que le cache possede
+SPEC (EF EG(!CACHE.asking)) -> EF (EG (PROC.CMD!=WR |(PROC.CMD=RD & PROC.addr!=CACHE.addR)))
+--On ne peut pas à la fois demander et avoir trouvé
+SPEC !(EF(CACHE.asking & CACHE.found))
